@@ -9,7 +9,8 @@ output: github_document
 library(tidyverse)
 library(dplyr)
 library(readxl)
-library(haven)
+library(modelr)
+library(mgcv)
 library(ggplot2)
 library(patchwork)
 knitr::opts_chunk$set(
@@ -42,19 +43,15 @@ bw =
   ) #all the other variables are continuous so we won't convert them
 
 #checking for NA's
-bw %>%
-  is.na() %>% 
-  summary()
-
 purrr::map(bw, ~ sum(is.na(.)))
 ```
 
-#For my model I included risk factors that I have learned in previous classes have have an affect on birthweight of a child, specifically contributing to low birthweight. In terms of sociodemographics, I included the mom's race(mrace) and the family's monthly income (fincome) because this affects the type of health care she may be recieving. In terms of behavioral risk factors, I included smoken because maternal smoking during pregnancy and the smoking intensity has been consistently related to low birthweight. In terms of preganncy specific factors, I included the mothers age at delievery(momage), the mothers weight at the delivery(delwt), gestationsal age in weeks(gaweeks), presence of malformations(malform), number of live births prior to this pregancy(parity), previous number of low birth weight babies (pnumlbw) and the number of prior small for gestational age babies(pnumgsa) into the model.
+#For my model I included risk factors that I have learned in previous classes have have an affect on birthweight of a child, specifically contributing to low birthweight. In terms of behavioral risk factors, I included smoken because maternal smoking during pregnancy and the smoking intensity has been consistently related to low birthweight. In terms of preganncy specific factors, I included the mothers age at delivry(momage), the mothers weight at the delivery(delwt), mother's weight gain during pregnancy(wtgain), presence of malformations(malform), number of live births prior to this pregancy(parity), and previous number of low birth weight babies (pnumlbw) into the model. I also added an interaction model between mother's weight at delivery and weight bain during pregnanacy as they are dependent on each other. 
 
 ```{r}
 #Propose a regression model for birthweight. This model may be based on a hypothesized structure for the factors that underly birthweight, on a data-driven model-building process, or a combination of the two. Describe your modeling process and show a plot of model residuals against fitted values – use add_predictions and add_residuals in making this plot.
 
-fitted_model_1 = lm(bwt ~ mrace + fincome + smoken + momage + delwt + gaweeks + malform + parity + pnumlbw + pnumsga, data = bw)
+fitted_model_1 = lm(bwt ~ smoken + momage + delwt + wtgain + malform + parity + pnumlbw + delwt*wtgain, data = bw)
 
 summary(fitted_model_1)
 
@@ -71,13 +68,90 @@ bw %>%
   theme(plot.title = element_text(hjust = 0.5))
 
 ```
-# Prediction values seem to be concentrated between 2600 and 3600 while the residual values seem to aggregate between -750 and 750. Now we will compared our model to two other models: 1. one predicting birth weight using length at birth baby and gestational age as the only main effects and 2.head circumference, length at birth baby, sex, and all interactions beteween these 3 variables to predict birth weight. 
+# Prediction values seem to be concentrated between 2750 and 3500 while the residual values seem to aggregate between -1000 and 900. Now we will compared our model to two other models: 1. one predicting birth weight using length at birth baby and gestational age as the only main effects and 2.head circumference, length at birth baby, sex, and all interactions beteween these 3 variables to predict birth weight. 
 ```{r}
+#Model 1: only baby length and gestational age
+provided_model1 = lm(bwt~ blength + gaweeks, data = bw) 
+summary(provided_model1)
 
+bw %>% 
+  modelr::add_residuals(provided_model1) %>% 
+  modelr::add_predictions(provided_model1) %>%
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point(alpha = .3) +
+  labs(
+    title = "Model 1: Body Length and Gestational Age Main Effects Only",
+    x = "Predictions",
+    y = "Residuals") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Model 2: head circumference, length at birth baby, sex, and all interactions
+provided_model2 = lm(bwt~ blength + babysex + bhead + blength*babysex*bhead + blength*babysex + blength*bhead + babysex*bhead, data = bw) 
+summary(provided_model2)
+
+bw %>% 
+  modelr::add_residuals(provided_model2) %>% 
+  modelr::add_predictions(provided_model2) %>%
+  ggplot(aes(x = pred, y = resid)) + 
+  geom_point(alpha = .3) +
+  labs(
+    title = "Model 2: Body Length, Head Circumference, 
+    Baby Sex, and All Possible Interactions",
+    x = "Predictions",
+    y = "Residuals") +
+  theme(plot.title = element_text(hjust = 0.5))
 ```
 
+```{r}
+#Make this comparison in terms of the cross-validated prediction error; use crossv_mc and functions in purrr as appropriate.
+cv_df =
+  crossv_mc(bw, 100)
 
+cv_df %>% pull(train) %>% .[[1]] %>% as_tibble
+cv_df %>% pull(test) %>% .[[1]] %>% as_tibble
 
+cv_df =
+  cv_df %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)) 
+
+#Now I have my testing and training datasets and have to fit my models and obtain the RMSEs using mutate + map
+
+cv_df = 
+  cv_df %>% 
+  mutate(
+    fitted_model_1  = map(train, ~lm(bwt ~ smoken + momage + delwt + wtgain + malform + parity + pnumlbw + delwt*wtgain, data = .x)),
+    provided_model1  = map(train, ~lm(bwt~ blength + gaweeks, data = .x)),
+    provided_model2  = map(train, ~lm(bwt~ blength + babysex + bhead + blength*babysex*bhead + blength*babysex + blength*bhead + babysex*bhead, data = .x))) %>% 
+mutate(
+    rmse_1 = map2_dbl(fitted_model_1, test, ~rmse(model = .x, data = .y)),
+    rmse_2 = map2_dbl(provided_model1, test, ~rmse(model = .x, data = .y)),
+    rmse_3 = map2_dbl(provided_model2, test, ~rmse(model = .x, data = .y)))
+
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  mutate(model = recode(model,
+                        "1" = "My Model",
+                        "2" = "Main Effects Model",
+                        "3" = "All Possible 
+                        Interactions Model")) %>%
+  ggplot(aes(x = model, y = rmse, fill = model)) + 
+  geom_violin() +
+  labs(
+    title = "Cross Validation of Average RSME for Each Model",
+    x = "Model",
+    y = "RSME"
+  ) 
+```
+
+#We can see that my model has the highest RMSE on average making it the worst predictor model out of the 3 discussed. The all possible interactions model has the lowest RMSE on average making it the best predictor model out of the 3. The distribution of my model’s violin plot has a similar shape to the main effects model except mine is wider and stumpy. If I would redo this, I would maybe reduce the amount of variables in the model and include more interaction terms because there is some form of dependence on other variables or effect modifiying for some variables. 
 
 ## Question 2
 
